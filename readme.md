@@ -3,9 +3,9 @@
 ## Monitoring you jobs with a progress bar. 
 
 This requires a Redis server to store the progress information. The following steps will guide you through setting up the Redis server and using submitit with a progress bar.
-### Python packages required:
+### Installation:
 ```bash
-pip install submitit redis pathos rich 
+pip install lytools_HPC 
 ```
 ### Step 1: Deploy a Redis service
 **DO NOT** deploy it on a HPC nodes. You can use your local machine or a server with a public IP address.
