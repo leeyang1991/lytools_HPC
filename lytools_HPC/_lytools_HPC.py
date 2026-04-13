@@ -108,7 +108,8 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
                         timeout_min=5,
                         slurm_partition="general",
                         exclude_nodes=None,
-                        pbar_update_freq=1
+                        pbar_update_freq=1,
+                        **kwargs
                       ):
     '''
     :param func: the kernel function to run, should take one argument, e.g. func(params)
@@ -125,8 +126,10 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
     :param slurm_partition: slurm partition
     :param exclude_nodes: list of nodes to exclude
     :param pbar_update_freq: frequency of updating progress bar
+    :param kwargs: other parameters for submitit.AutoExecutor
     '''
 
+    init_job(job_name, params_list)
     if len(params_list) == 0:
         raise ValueError("params_list is empty")
     if len(params_list) > job_number_limit:
@@ -175,7 +178,8 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
         timeout_min=timeout_min,
         slurm_array_parallelism=slurm_array_parallelism,
         slurm_partition=slurm_partition,
-        exclude=exclude_nodes,
+        slurm_exclude=exclude_nodes,
+        **kwargs
     )
     jobs = executor.map_array(final_func, final_params_list)
 
@@ -190,6 +194,7 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
         "Partition":slurm_partition,
     }
     pretty_table_print(info)
+    progress_bar_monitoring(job_name)
 
 
 

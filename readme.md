@@ -57,15 +57,17 @@ yourpassword
 
 ### Step 2: Submit your jobs
 ```python
-from HPC_func import *
+from lytools_HPC import *
 
-def my_function(x):
-    return x * x
+def my_function(params):
+    x,y = params
+    return x * y
 
 job_name = 'Your_job_name'
-params_list = [1,2,3,4,5,6,7,8,9,10]
+x_list = [1,2,3,4,5,6,7,8,9,10]
+y_list = [2,3,4,5,6,7,8,9,10,11]
+params_list = list(zip(x_list,y_list))
 log_folder = 'Your_log_folder'
-init_job(job_name, params_list)
 sumbit_jobs_array(my_function, params_list, log_folder,
                   job_name=job_name,
                   job_number_limit=1,
@@ -81,16 +83,9 @@ sumbit_jobs_array(my_function, params_list, log_folder,
                   )
 ```
 
-### Step 3: Monitor the progress bar
+### Step 3: Check the log files
 ```python
-from HPC_func import *
-job_name = 'Your_job_name'
-progress_bar_monitoring(job_name)
-```
-
-### Step 4: Check the log files
-```python
-from HPC_func import *
+from lytools_HPC import *
 log_folder = 'Your_log_folder'
 Check_logs(log_folder).read_err_files() # Read error files
 Check_logs(log_folder).read_out_files() # Read output files
