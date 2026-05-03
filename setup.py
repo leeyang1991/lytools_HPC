@@ -27,5 +27,7 @@ setup(
     'rich',
     'requests',
     'packaging',
+    'tqdm',
+    'psutil',
     ],
 )

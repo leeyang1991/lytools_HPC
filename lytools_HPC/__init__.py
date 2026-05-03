@@ -1,8 +1,9 @@
 # coding='utf-8'
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 __package_name__ = 'lytools_HPC'
 import warnings
 import requests
+import json
 from packaging import version
 
 def check_latest_version(package_name, current_version, cache_hours=0.1):

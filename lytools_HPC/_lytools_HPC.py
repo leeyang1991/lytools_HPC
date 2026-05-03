@@ -1,15 +1,26 @@
+from os.path import isdir
+
 import submitit
 from concurrent.futures import ThreadPoolExecutor
 import redis
 from threading import Lock
+
 from pathos.multiprocessing import ProcessPool
 import time
 from rich.text import Text
+import datetime
+import hashlib
+from pprint import pprint
+import shutil
 
 import os
-import json
 from pathlib import Path
 import pickle
+from tqdm import tqdm
+from functools import partialmethod
+
+import psutil
+
 
 from rich.progress import (
     Progress,
@@ -19,6 +30,7 @@ from rich.progress import (
     TimeElapsedColumn,
     ProgressColumn
 )
+
 
 
 def listdir(fdir):
@@ -71,7 +83,7 @@ def get_redis():
 _LOCK = Lock()
 _LOCAL_COUNTER = 0
 
-def update_i(job_name, batch_size=100):
+def update_i_global(job_name, batch_size=1):
     '''
     :param job_name:
     '''
@@ -85,11 +97,15 @@ def update_i(job_name, batch_size=100):
             r.hincrby(job_name, "step", _LOCAL_COUNTER)
             _LOCAL_COUNTER = 0
 
+def update_i(job_name):
+    r = get_redis()
+    r.hincrby(job_name, "step", 1)
+
 class IterSpeedColumn(ProgressColumn):
 
     def render(self, task):
-        if task.finished:
-            return Text(f"{task.speed:.2f} it/s", style="green")
+        # if task.finished:
+        #     return Text(f"{task.speed:.2f} it/s", style="green")
 
         speed = task.speed
 
@@ -98,8 +114,9 @@ class IterSpeedColumn(ProgressColumn):
 
         return Text(f"{speed:.2f} it/s", style="cyan")
 
+
 def sumbit_jobs_array(func,params_list,log_folder,job_name,
-                        job_number_limit=500,
+                        job_number_limit=10,
                         parallel_process_per_task=10,
                         slurm_array_parallelism=20,
                         parallel_process_p_or_t='p',
@@ -108,6 +125,148 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
                         timeout_min=5,
                         slurm_partition="general",
                         exclude_nodes=None,
+                        specific_nodes=None,
+                        pbar_update_freq=1,
+                        skip_confirmation=False,
+                        **kwargs
+                      ):
+    '''
+    :param func: the kernel function to run, should take one argument, e.g. func(params)
+    :param params_list: list of tuples [params1, params2, ...]
+    :param log_folder: slurm log_folder
+    :param job_name: slurm job_name
+    :param job_number_limit: number of total jobs you want to submit to slurm
+    :param parallel_process_per_task: number of parallel processes per task, Recommend equal to :param cpus_per_task
+    :param slurm_array_parallelism: slurm array parallelism
+    :param parallel_process_p_or_t: 'p' for multiprocessing, 't' for multi-threading
+    :param cpus_per_task: number of cpus per task
+    :param mem_gb: memory per task
+    :param timeout_min: timeout in minutes
+    :param slurm_partition: slurm partition
+    :param exclude_nodes: list of nodes to exclude
+    :param pbar_update_freq: frequency of updating progress bar
+    :param kwargs: other parameters for submitit.AutoExecutor
+    '''
+    if not is_iterable(params_list):
+        raise TypeError("params_list must be iterable")
+    # job_name_failed = job_name + '__FAILED__'
+    init_job(job_name, params_list)
+    # init_job(job_name_failed, params_list)
+    # print(params_list)
+    # exit()
+    if len(params_list) == 0:
+        raise ValueError("params_list is empty")
+    if len(params_list) > job_number_limit:
+        super_params_list = split_into_n_jobs(params_list,job_number_limit)
+        if parallel_process_p_or_t == 't':
+            def super_func(chunk):
+                def wrapper(p):
+                    tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
+                    func(p)
+                    update_i_global(job_name, pbar_update_freq)
+
+                with ThreadPoolExecutor(max_workers=parallel_process_per_task) as Thread_:
+                    list(Thread_.map(wrapper, chunk))
+
+        elif parallel_process_p_or_t == 'p':
+            def super_func(chunk):
+                # for p in chunk:
+                #     func(p)
+
+                def wrapper(p):
+                    # try:
+                    tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
+                    func(p)
+                    update_i_global(job_name, pbar_update_freq)
+
+                pool = ProcessPool(nodes=parallel_process_per_task)
+                pool.map(wrapper, chunk)
+                pool.close()
+                pool.join()
+            pass
+        else:
+            raise ValueError("parallel_process_p_or_t must be 'p' for multiprocessing or 't' for threading")
+
+        final_params_list = super_params_list
+        final_func = super_func
+    else:
+        final_params_list = params_list
+        def func_wapper(p):
+            # try:
+            tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
+            func(p)
+            update_i_global(job_name, pbar_update_freq)
+            # except Exception as e:
+                # log_error_info(log_folder, e, p)
+                # r = get_redis()
+                # r.hincrby(job_name_failed, "step", pbar_update_freq)
+
+        final_func = func_wapper
+
+    if os.path.exists(log_folder):
+        for f in os.listdir(log_folder):
+            if f.startswith('.'):
+                continue
+            fpath = os.path.join(log_folder, f)
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+            else:
+                shutil.rmtree(fpath)
+
+    mkdir(log_folder, force=True)
+    # log_folder_obj = Path(log_folder)
+    # fail_log_folder = log_folder_obj / 'failed_tasks'
+    # mkdir(fail_log_folder, force=True)
+
+    Concurrent_Processes = parallel_process_per_task * slurm_array_parallelism
+    if Concurrent_Processes > len(final_params_list):
+        Concurrent_Processes = len(final_params_list)
+    Total_Cores_Used = cpus_per_task * slurm_array_parallelism
+    if Total_Cores_Used > len(final_params_list):
+        Total_Cores_Used = len(final_params_list)
+    info = {
+        "Total Cores Used": Total_Cores_Used,
+        "Concurrent Processes": Concurrent_Processes,
+        "Total Loop Length": len(params_list),
+        "Number of Jobs": len(final_params_list),
+        "Memory for Each Job(GB)": mem_gb,
+        "Time out Minutes For Each Job": timeout_min,
+        "Partition": slurm_partition,
+    }
+    pretty_table_print(info)
+    if not skip_confirmation:
+        input('\33[7m' + "PRESS ENTER TO SUBMIT..." + '\33[0m')
+    print('submiting...')
+    executor = submitit.AutoExecutor(folder=log_folder)
+    executor.update_parameters(
+        slurm_job_name=job_name,
+        cpus_per_task=cpus_per_task,
+        mem_gb=mem_gb,
+        timeout_min=timeout_min,
+        slurm_array_parallelism=slurm_array_parallelism,
+        slurm_partition=slurm_partition,
+        slurm_exclude=exclude_nodes,
+        slurm_nodelist=specific_nodes,
+        **kwargs
+    )
+    # print(executor.parameters)
+    # exit()
+
+    jobs = executor.map_array(final_func, final_params_list)
+    print('jobs submitted, job ids:', jobs[0].job_id)
+    progress_bar_monitoring(job_name,log_folder)
+
+def resumbit_failed_jobs_array(func,params_list,log_folder,job_name,mode,
+                        job_number_limit=10,
+                        parallel_process_per_task=10,
+                        slurm_array_parallelism=20,
+                        parallel_process_p_or_t='p',
+                        cpus_per_task=1,
+                        mem_gb=1,
+                        timeout_min=5,
+                        slurm_partition="general",
+                        exclude_nodes=None,
+                        specific_nodes=None,
                         pbar_update_freq=1,
                         **kwargs
                       ):
@@ -128,8 +287,32 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
     :param pbar_update_freq: frequency of updating progress bar
     :param kwargs: other parameters for submitit.AutoExecutor
     '''
+    if not is_iterable(params_list):
+        raise TypeError("params_list must be iterable")
+    log_folder_RESUBMIT = log_folder + '_RESUBMIT'
+    if isdir(log_folder_RESUBMIT):
+        failed_param_list = Check_logs(log_folder_RESUBMIT).get_err_params()
+    else:
+        failed_param_list = Check_logs(log_folder).get_err_params()
+    if mode == 'all':
+        new_params_list = failed_param_list + params_list
+    elif mode == 'err':
+        new_params_list = failed_param_list
+        pass
+    else:
+        raise ValueError("mode must be one of 'err' or 'all'")
+    new_params_list = list(set(new_params_list))
 
+    # print(new_params_list)
+    # exit()
+    # job_name_failed = job_name + '__FAILED__'
+    params_list = new_params_list
+    pprint(params_list)
+    print('failed params len:',len(params_list))
     init_job(job_name, params_list)
+    # init_job(job_name_failed, params_list)
+    # print(params_list)
+    # exit()
     if len(params_list) == 0:
         raise ValueError("params_list is empty")
     if len(params_list) > job_number_limit:
@@ -137,8 +320,9 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
         if parallel_process_p_or_t == 't':
             def super_func(chunk):
                 def wrapper(p):
+                    tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
                     func(p)
-                    update_i(job_name,pbar_update_freq)
+                    update_i_global(job_name, pbar_update_freq)
 
                 with ThreadPoolExecutor(max_workers=parallel_process_per_task) as Thread_:
                     list(Thread_.map(wrapper, chunk))
@@ -149,11 +333,15 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
                 #     func(p)
 
                 def wrapper(p):
+                    # try:
+                    tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
                     func(p)
-                    update_i(job_name,pbar_update_freq)
+                    update_i_global(job_name, pbar_update_freq)
 
                 pool = ProcessPool(nodes=parallel_process_per_task)
                 pool.map(wrapper, chunk)
+                pool.close()
+                pool.join()
             pass
         else:
             raise ValueError("parallel_process_p_or_t must be 'p' for multiprocessing or 't' for threading")
@@ -162,15 +350,53 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
         final_func = super_func
     else:
         final_params_list = params_list
-        final_func = func
+        def func_wapper(p):
+            # try:
+            tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
+            func(p)
+            update_i_global(job_name, pbar_update_freq)
+            # except Exception as e:
+                # log_error_info(log_folder, e, p)
+                # r = get_redis()
+                # r.hincrby(job_name_failed, "step", pbar_update_freq)
 
-    if os.path.exists(log_folder):
-        for f in os.listdir(log_folder):
-            os.remove(os.path.join(log_folder, f))
-    mkdir(log_folder, force=True)
+        final_func = func_wapper
 
+
+    # log_folder_obj = Path(log_folder)
+    # fail_log_folder = log_folder_obj / 'failed_tasks'
+    # mkdir(fail_log_folder, force=True)
+    Concurrent_Processes = parallel_process_per_task * slurm_array_parallelism
+    if Concurrent_Processes > len(final_params_list):
+        Concurrent_Processes = len(final_params_list)
+    Total_Cores_Used = cpus_per_task * slurm_array_parallelism
+    if Total_Cores_Used > len(final_params_list):
+        Total_Cores_Used = len(final_params_list)
+    info = {
+        "Total Cores Used": Total_Cores_Used,
+        "Concurrent Processes": Concurrent_Processes,
+        "Total Loop Length": len(params_list),
+        "Number of Jobs": len(final_params_list),
+        "Memory for Each Job(GB)": mem_gb,
+        "Time out Minutes For Each Job": timeout_min,
+        "Partition": slurm_partition,
+    }
+    print("\n=== re-submit===")
+    pretty_table_print(info)
+    input('\33[7m' + "PRESS ENTER TO SUBMIT..." + '\33[0m')
+    if os.path.exists(log_folder_RESUBMIT):
+        for f in os.listdir(log_folder_RESUBMIT):
+            if f.startswith('.'):
+                continue
+            fpath = os.path.join(log_folder_RESUBMIT, f)
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+            else:
+                shutil.rmtree(fpath)
+
+    mkdir(log_folder_RESUBMIT, force=True)
     print('submiting...')
-    executor = submitit.AutoExecutor(folder=log_folder)
+    executor = submitit.AutoExecutor(folder=log_folder_RESUBMIT)
     executor.update_parameters(
         slurm_job_name=job_name,
         cpus_per_task=cpus_per_task,
@@ -179,23 +405,89 @@ def sumbit_jobs_array(func,params_list,log_folder,job_name,
         slurm_array_parallelism=slurm_array_parallelism,
         slurm_partition=slurm_partition,
         slurm_exclude=exclude_nodes,
+        slurm_nodelist=specific_nodes,
         **kwargs
     )
+    # print(executor.parameters)
+    # exit()
+
     jobs = executor.map_array(final_func, final_params_list)
+    print('jobs submitted, job ids:', jobs[0].job_id)
+    progress_bar_monitoring(job_name,log_folder)
 
-    info = {
-        "Total Cores Used": cpus_per_task * slurm_array_parallelism,
-        "Concurrent Processes": parallel_process_per_task * slurm_array_parallelism,
-        "Total Loop Length": len(params_list),
-        "Number of Jobs": len(final_params_list),
-        "First Job ID": jobs[0].job_id,
-        "Memory for Each Job(GB)":mem_gb,
-        "Time out Minutes For Each Job": timeout_min,
-        "Partition":slurm_partition,
+
+def shasum_string(input_string):
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(input_string.encode('utf-8'))
+    hex_dig = sha256_hash.hexdigest()
+    return hex_dig
+
+def log_error_info(log_folder,err_info,fail_param_list):
+    all_id_str = ''
+    for param in fail_param_list:
+        id_val = id(param)
+        id_val_str = str(id_val) + ' '
+        all_id_str += id_val_str
+    all_id_str_shasum = shasum_string(all_id_str)
+    all_id_str_shasum_short = all_id_str_shasum[:10]
+    log_folder_obj = Path(log_folder)
+    fail_log_folder = log_folder_obj / 'failed_tasks'
+    fail_log_file = fail_log_folder / f"{all_id_str_shasum_short}.pkl"
+    now = datetime.datetime.now()
+    err_info_dict = {
+        'time': now.strftime("%Y-%m-%d %H:%M:%S"),
+        'params': fail_param_list,
+        'err_info': err_info
     }
-    pretty_table_print(info)
-    progress_bar_monitoring(job_name)
+    with open(fail_log_file, 'wb') as fw:
+        pickle.dump(err_info_dict, fw)
+    pass
 
+
+def submit_single_job(func,params,log_folder,job_name,
+                      cpus_per_task=1,
+                      mem_gb=1,
+                      timeout_min=5,
+                      slurm_partition="general",
+                      exclude_nodes=None,
+                      specific_nodes=None,
+                      ):
+    if os.path.exists(log_folder):
+        for f in os.listdir(log_folder):
+            os.remove(os.path.join(log_folder, f))
+    mkdir(log_folder, force=True)
+    executor = submitit.AutoExecutor(folder=log_folder)
+    executor.update_parameters(
+        slurm_job_name=job_name,
+        timeout_min=timeout_min,
+        cpus_per_task=cpus_per_task,
+        mem_gb=mem_gb,
+        slurm_partition=slurm_partition,
+        slurm_nodelist=specific_nodes,
+        slurm_exclude=exclude_nodes,
+    )
+    def func_wrapper(*args, **kwargs):
+        tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
+        func(*args, **kwargs)
+    job = executor.submit(func_wrapper, params)
+    job_id = job.job_id
+    print("job id:", job_id)
+
+    start_time = datetime.datetime.now()
+    while 1:
+        Check_logs(log_folder).read_out_files_single_job()
+        print('='*20)
+        Check_logs(log_folder).read_err_files_single_job()
+        now = datetime.datetime.now()
+        delta = now - start_time
+        print('Params:')
+        pprint(params)
+        print('Job name:',job_name)
+        print('Job ID:',job_id)
+        print('time elapsed:', delta)
+
+        time.sleep(5)
+        os.system('clear')
 
 
 def pretty_table_print(info):
@@ -207,87 +499,6 @@ def pretty_table_print(info):
     print("=" * (max_key_len + 15))
     pass
 
-def monitoring_job(progress_dir_json):
-    refresh_interval = 1
-    # refresh_interval = 5
-    task_map = {}
-    with Progress(
-            TextColumn("[bold yellow]{task.description}"),
-            BarColumn(style="red",  # Unfinished part
-                      complete_style="green",  # Finished part
-                      finished_style="yellow"),  # 100% finished),
-            TextColumn("{task.completed}/{task.total} {task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-    ) as progress_total:
-
-        with Progress(
-                TextColumn("[bold yellow]{task.description}"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total} {task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-        ) as progress:
-
-            overall_task = None
-            total_jobs = None
-
-            while True:
-
-                files = list(progress_dir_json.glob("*.json"))
-                finished_jobs = 0
-
-                for f in files:
-
-                    try:
-                        with open(f) as fp:
-                            data = json.load(fp)
-                    except:
-                        continue
-
-                    jobid = data["jobid"]
-                    step = data["step"]
-                    total = data["total"]
-                    total_job = data["total_job"]
-                    sub_job_name = data["sub_job_name"]
-
-                    # 初始化 total progress
-
-                    if total_jobs is None:
-                        total_jobs = total_job
-                        overall_task = progress_total.add_task(
-                            "[bold green]TOTAL", total=total_jobs
-                        )
-
-                    # if completed
-                    if step >= total:
-
-                        finished_jobs += 1
-
-                        if jobid in task_map:
-                            progress.remove_task(task_map[jobid])
-                            del task_map[jobid]
-
-                        continue
-
-                    # create bar
-                    if jobid not in task_map:
-                        task_map[jobid] = progress.add_task(
-                            f"({jobid}/{total_job}) {sub_job_name}", total=total
-                        )
-
-                    progress.update(task_map[jobid], completed=step)
-
-                # update total bar
-                if overall_task is not None:
-                    progress_total.update(overall_task, completed=finished_jobs)
-
-                # All tasks completed
-                if total_jobs and finished_jobs == total_jobs:
-                    break
-
-                time.sleep(refresh_interval)
-    pass
 
 class HPC_redis:
 
@@ -354,6 +565,41 @@ class Check_logs:
         print('#################')
         pass
 
+    def read_err_files_inside_progress_bar(self):
+        log_folder = self.log_folder
+        log_folder = Path(log_folder)
+        for f in listdir(log_folder):
+            if not f.endswith(".err"):
+                continue
+            fpath = log_folder / f
+            # print(fpath)
+            with open(fpath) as fr:
+                err_content = fr.read()
+                if len(err_content) != 0:
+                    print('==============')
+                    print(f"Error in file: {f}")
+                    print(err_content)
+        pass
+
+    def read_err_files_single_job(self):
+        log_folder = self.log_folder
+        log_folder = Path(log_folder)
+        err_count = 0
+        for f in listdir(log_folder):
+            if not f.endswith(".err"):
+                continue
+            fpath = log_folder / f
+            # print(fpath)
+            with open(fpath) as fr:
+                err_content = fr.read()
+                if len(err_content) != 0:
+                    print('==============')
+                    print(f"Error in file: {f}")
+                    print(err_content)
+                    err_count += 1
+        print(f'Total error logs: {err_count}')
+        pass
+
     def read_out_files(self):
         log_folder = self.log_folder
         log_folder = Path(log_folder)
@@ -368,8 +614,27 @@ class Check_logs:
                 print(log_content)
                 print('------------')
                 count += 1
-        print(f'Total files: {count}')
+        print('#################')
+        print(f'Total out files: {count}')
+        print('#################')
         pass
+
+    def read_out_files_single_job(self):
+        log_folder = self.log_folder
+        log_folder = Path(log_folder)
+        count = 0
+        for f in listdir(log_folder):
+            if not f.endswith(".out"):
+                continue
+            fpath = log_folder / f
+            # print(fpath)
+            with open(fpath) as fr:
+                log_content = fr.read()
+                print(log_content)
+                print('------------')
+                count += 1
+        pass
+
 
     def read_result_files(self):
         log_folder = self.log_folder
@@ -403,6 +668,45 @@ class Check_logs:
         print(f'Total files: {count}')
         pass
 
+    def get_err_params(self):
+        fdir = Path(self.log_folder)
+
+        err_id_list = []
+        for f in listdir(fdir):
+            if not f.endswith('_log.out'):
+                continue
+            fpath = fdir / f
+            with open(fpath, 'r') as fr:
+                log_content = fr.read()
+                # print(log_content)
+                if 'submitit ERROR' in log_content:
+                    err_id = f.replace('_0_log.out','')
+                    err_id_list.append(err_id)
+                    print('========')
+                if not 'Job completed successfully' in log_content:
+                    err_id = f.replace('_0_log.out', '')
+                    err_id_list.append(err_id)
+                    print('========')
+
+        for f in listdir(fdir):
+            if not f.endswith('_log.err'):
+                continue
+            fpath = fdir / f
+            with open(fpath, 'r') as fr:
+                log_content = fr.read()
+                print(log_content)
+                if 'submitit ERROR' in log_content:
+                    err_id = f.replace('_0_log.err', '')
+                    err_id_list.append(err_id)
+        err_id_list = list(set(err_id_list))
+        args_list = []
+        for err_id in err_id_list:
+            params_f = fdir / f'{err_id}_submitted.pkl'
+            with open(params_f, 'rb') as fr:
+                submit_info_obj = pickle.load(fr)
+                args = submit_info_obj.args[0]
+                args_list.append(args)
+        return args_list
 
 def init_job(job_name,param_list):
     total_job = len(param_list)
@@ -412,26 +716,15 @@ def init_job(job_name,param_list):
     r.hset(job_name, 'step', str(0))
 
 
-def flush_progress(job_name):
-    global _LOCAL_COUNTER
-
-    if _LOCAL_COUNTER > 0:
-        r = get_redis()
-        r.hincrby(job_name, "step", _LOCAL_COUNTER)
-        _LOCAL_COUNTER = 0
-
-
-def update_progress(job_name, batch_size=100):
-    update_i(job_name, batch_size)
-    flush_progress(job_name)
-
-def progress_bar_monitoring(job_name):
+def progress_bar_monitoring(job_name,log_folder):
+    # failed_job_name = job_name + '__FAILED__'
+    job_name_str = job_name
+    if len(job_name) > 20:
+        job_name_str = '...'+job_name[-20:]
     hpc_redis = HPC_redis()
-    info=hpc_redis.r.hgetall(job_name)
-    total = info.get(b'total')
-    step = info.get(b'step')
+    info_overall=hpc_redis.r.hgetall(job_name)
+    total = info_overall.get(b'total')
     total_int = int(total)
-    step_int = int(step)
     # exit()
     with Progress(
         TextColumn("[bold yellow]{task.description}"),
@@ -442,14 +735,42 @@ def progress_bar_monitoring(job_name):
         TimeRemainingColumn(),
         # show_speed=True,
     ) as progress:
-        task = progress.add_task(f"[bold green]{job_name}", total=total_int)
+        task_success = progress.add_task(f"[bold green]{job_name_str}", total=total_int)
+        # task_failed = progress.add_task(f"[bold red]{job_name}_FAILED", total=total_int)
         while True:
-            info = hpc_redis.r.hgetall(job_name)
-            # print(info)
-            step = info.get(b'step')
-            step_int = int(step)
-            progress.update(task, completed=step_int)
-            if step_int >= total_int:
+            info_success = hpc_redis.r.hgetall(job_name)
+            step_success = info_success.get(b'step')
+            step_int_success = int(step_success)
+
+            # info_failed = hpc_redis.r.hgetall(failed_job_name)
+            # step_failed = info_failed.get(b'step')
+            # step_int_failed = int(step_failed)
+
+            progress.update(task_success, completed=step_int_success)
+            # progress.update(task_failed, completed=step_int_failed)
+
+            if step_int_success >= total_int:
                 break
+
+            # if step_int_failed >= total_int:
+            #     break
+            Check_logs(log_folder).read_err_files_inside_progress_bar()
+
             time.sleep(1)
+
+def is_iterable(obj):
+    try:
+        iter(obj)
+        return True
+    except TypeError:
+        return False
+
+
+def memory_estimate():
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info()
+    print("RSS (MB):", mem.rss / 1024 ** 2)
+    print("VMS (MB):", mem.vms / 1024 ** 2)
+    # pause
+    input('\33[7m' + "PRESS ENTER TO CONTINUE." + '\33[0m')
 
