@@ -975,7 +975,7 @@ def generate_random_string():
     return hex_dig
 
 
-def get_unavailable_nodes(partition):
+def get_unavailable_nodes():
     command = ["sinfo"]
     try:
         result = subprocess.run(command, capture_output=True, text=True)
@@ -986,17 +986,14 @@ def get_unavailable_nodes(partition):
     NODELIST_unvailable = []
     for line in result_lines:
         PARTITION, AVAIL, TIMELIMIT, NODES, STATE, NODELIST = line.split()
-        if partition in PARTITION:
-            if 'comp' in STATE or 'alloc' in STATE or 'drain' in STATE:
-                if not 'cn' in NODELIST:
-                    continue
-                # print(partition, PARTITION,STATE,NODELIST)
-
-                NODELIST_list, NODELIST_list_str = parse_node_list(NODELIST)
-                NODELIST_unvailable.extend(NODELIST_list)
-            if 'preempt' in PARTITION:
-                NODELIST_list, NODELIST_list_str = parse_node_list(NODELIST)
-                NODELIST_unvailable.extend(NODELIST_list)
+        if not 'cn' in NODELIST:
+            continue
+        if 'comp' in STATE or 'alloc' in STATE or 'drain' in STATE:
+            NODELIST_list, NODELIST_list_str = parse_node_list(NODELIST)
+            NODELIST_unvailable.extend(NODELIST_list)
+        if 'preempt' in PARTITION:
+            NODELIST_list, NODELIST_list_str = parse_node_list(NODELIST)
+            NODELIST_unvailable.extend(NODELIST_list)
     NODELIST_unvailable = list(set(NODELIST_unvailable))
     NODELIST_unvailable.sort()
     NODELIST_unvailable_str = 'cn' + str(NODELIST_unvailable)
