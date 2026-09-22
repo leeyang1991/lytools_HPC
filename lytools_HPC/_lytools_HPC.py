@@ -404,6 +404,13 @@ def sumbit_jobs_array(func,params_list,
     timeout_obj = datetime.timedelta(minutes=timeout_min)
     # print(timeout_obj)
     # exit()
+    if is_skip_unavailable_nodes:
+        exclude_nodes_str = get_unavailable_nodes()
+    else:
+        exclude_nodes_str = None
+    final_exclude_nodes = add_node_list(exclude_nodes_str, exclude_nodes)
+    final_exclude_nodes_list, final_exclude_nodes_list_str = parse_node_list(final_exclude_nodes)
+    final_exclude_nodes = simplify_nodes_list(final_exclude_nodes_list)
     info = OrderedDict({
         "Total Cores Used": Total_Cores_Used,
         "Concurrent Processes": Concurrent_Processes,
@@ -417,17 +424,12 @@ def sumbit_jobs_array(func,params_list,
         "Log Folder": log_folder,
         "Watch Dog Time": watch_dog_timeout_seconds,
     })
+    info['Exclude Nodes'] = final_exclude_nodes
     pretty_table_print(info)
     if not skip_confirmation:
         input('\33[7m' + "PRESS ENTER TO SUBMIT..." + '\33[0m')
     print('submiting...')
-    if is_skip_unavailable_nodes:
-        exclude_nodes_str = get_unavailable_nodes(slurm_partition)
-    else:
-        exclude_nodes_str = None
-    final_exclude_nodes = add_node_list(exclude_nodes_str, exclude_nodes)
-    final_exclude_nodes_list, final_exclude_nodes_list_str = parse_node_list(final_exclude_nodes)
-    final_exclude_nodes = simplify_nodes_list(final_exclude_nodes_list)
+
 
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
