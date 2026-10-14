@@ -1021,8 +1021,11 @@ def parse_node_list(node_list_str):
                 for node_i in range(start_nodes, end_nodes+1):
                     NODELIST_list.append(node_i)
             else:
-                node_i = int(nodes)
-                NODELIST_list.append(node_i)
+                try:
+                    node_i = int(nodes)
+                    NODELIST_list.append(node_i)
+                except:
+                    continue
     else:
         NODE = int(NODELIST)
         NODELIST_list.append(NODE)
