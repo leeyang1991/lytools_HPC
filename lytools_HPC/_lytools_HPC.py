@@ -952,6 +952,8 @@ def progress_bar_monitoring(job_name,log_folder=None):
                 # break
 
             time.sleep(2)
+    command = ["scancel", f"{submit_info_dict['Job id']}"]
+    subprocess.run(command, capture_output=True, text=True)
 
 def is_iterable(obj):
     try:
