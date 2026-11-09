@@ -1,92 +1,208 @@
-#  HPC Functions
+# lytools_HPC
 
-## Monitoring you jobs with a progress bar. 
+`lytools_HPC` is a Python batch-processing utility built on Submitit. It runs parameter lists locally or on Slurm HPC clusters and monitors execution through Redis and a terminal progress bar.
 
-This requires a Redis server to store the progress information. The following steps will guide you through setting up the Redis server and using submitit with a progress bar.
-### Installation:
+## Features
+
+- **Batch submission:** Split a parameter list into batches and submit them through `submitit.AutoExecutor`.
+- **Two levels of parallelism:** Run multiple batches concurrently, with a thread pool or process pool inside each batch.
+- **Progress monitoring:** Use Redis counters, heartbeats, and job logs to display progress, processing speed, estimated remaining time, and batch status with Rich.
+- **Log inspection:** Inspect output, errors, Submitit results, and submission records, and extract parameters from failed batches.
+
+## Installation
+
 ```bash
-pip install lytools_HPC 
+pip install lytools_HPC
 ```
-### Step 1: Deploy a Redis service
-**DO NOT** deploy it on a HPC nodes. You can use your local machine or a server with a public IP address.
-#### Deploy redis via Docker
-Compose file for Redis server:
-```yaml
-services:
-  redis-progress:
-    image: redis:7
-    container_name: redis-progress
-    restart: unless-stopped
 
-    ports:
-      - "6379:6379"
+To install the current source checkout, run from the project root:
 
-    volumes:
-      - ./redis_data:/data
-
-    command: >
-      redis-server
-      --appendonly yes
-      --requirepass yourpassword
-      --maxmemory 2gb
-      --maxmemory-policy allkeys-lru
-      
-    deploy:
-      resources:
-        limits:
-          memory: 3g
-
+```bash
+pip install -e .
 ```
-```docker compose up -d``` # Start the Redis server
 
-#### Test Redis connection
+Dependencies include `submitit`, `redis`, `pathos`, `rich`, `requests`, `packaging`, `tqdm`, and `psutil`.
+
+Redis server executable files support these platforms:
+
+| Operating system | Architecture | Executable |
+| --- | --- | --- |
+| macOS | Apple Silicon / arm64 | [redis-server_AppleSilicon](https://github.com/leeyang1991/lytools_HPC/releases/download/v0.1.0/redis-server_AppleSilicon) |
+| Linux | x86_64 | [redis-server_Linux_x86](https://github.com/leeyang1991/lytools_HPC/releases/download/v0.1.0/redis-server_Linux_x86) |
+
+
+### Running on HPC
+
+1. Request a compute node in advance.
+2. Connect to that node through SSH or PyCharm Remote SSH and run your submission script. If a new Redis service is needed, it starts on that node.
+
+
+### Running locally
+
+Use the same Python interface; Submitit selects the execution backend automatically. 
+
+## Quick Start
+
+The current public submission function is named **`sumbit_jobs_array`**. 
+
 ```python
-import redis
-r = redis.Redis(host='your_redis_host', port=6379, password='yourpassword')
-r.set('test_key', 'test_value')
-print(r.get('test_key').decode())
-```
+from pathlib import Path
+import uuid
 
-#### Create redis connection configuration file
-Location: ```~/.config/redis/redis.conf```
-```txt
-your_redis_host
-6379
-yourpassword
-```
+from lytools_HPC import sumbit_jobs_array
 
-### Step 2: Submit your jobs
-```python
-from lytools_HPC import *
 
-def my_function(params):
-    x,y = params
+def multiply(params):
+    x, y = params
     return x * y
 
-job_name = 'Your_job_name'
-x_list = [1,2,3,4,5,6,7,8,9,10]
-y_list = [2,3,4,5,6,7,8,9,10,11]
-params_list = list(zip(x_list,y_list))
-log_folder = 'Your_log_folder'
-sumbit_jobs_array(my_function, params_list, log_folder,
-                  job_name=job_name,
-                  job_number_limit=1,
-                  parallel_process_per_task=2,
-                  slurm_array_parallelism=1,
-                  parallel_process_p_or_t='p',
-                  cpus_per_task=10,
-                  mem_gb=2,
-                  timeout_min=10,
-                  slurm_partition="general",
-                  exclude_nodes=None,
-                  pbar_update_freq=1,
-                  )
+
+if __name__ == '__main__':
+    job_name = 'multiply-' + uuid.uuid4().hex[:8]
+    log_folder = Path.home() / 'lytools_jobs' / job_name
+    params_list = [(i, i + 1) for i in range(1, 11)]
+
+    sumbit_jobs_array(
+        multiply,
+        params_list,
+        log_folder=str(log_folder),
+        job_name=job_name,
+        job_number_limit=2,
+        parallel_process_per_task=2,
+        slurm_array_parallelism=2,
+        parallel_process_p_or_t='t',
+        cpus_per_task=2,
+        mem_gb=1,
+        timeout_min=10,
+        slurm_partition='general',  # Set an available partition on your cluster.
+        pbar_update_freq=1,
+        skip_confirmation=False,
+        is_skip_unavailable_nodes=False,
+    )
 ```
 
-### Step 3: Check the log files
+
+## Submission Parameters
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `func` | Required | Worker function with the signature `func(params)`. |
+| `params_list` | Required | Parameter groups, one per function call. |
+| `log_folder` | `None` | Defaults to `~/.config/lytools_HPC_log/<job_name>`. |
+| `job_name` | `None` | Generated randomly if omitted; also identifies Redis progress state. |
+| `job_number_limit` | `10` | Number of batches; reduced automatically if it exceeds the parameter count. |
+| `parallel_process_per_task` | `10` | Number of worker threads or processes within each batch. |
+| `slurm_array_parallelism` | `-1` | Maximum concurrent array batches; `-1` uses the batch count. |
+| `parallel_process_p_or_t` | `'p'` | `'p'` for processes or `'t'` for threads. |
+| `cpus_per_task` | `1` | CPUs requested per job; generally match this to the worker count. |
+| `mem_gb` | `1` | Memory requested per job, in GB. |
+| `timeout_min` | `600` | Time limit per job, in minutes. |
+| `slurm_partition` | `'general'` | Slurm partition. |
+| `exclude_nodes` | `None` | Node exclusion string, such as `cn[1-3,8]`. |
+| `specific_nodes` | `None` | Explicit node list passed to Slurm. |
+| `pbar_update_freq` | `1` | Number of completed parameter groups accumulated per execution process before reporting to Redis. |
+| `skip_confirmation` | `False` | Skip the submission confirmation prompt. |
+| `watch_dog_timeout_seconds` | `10` | Heartbeat interval and timeout setting, in seconds. |
+| `error_skip` | `False` | Catch individual parameter errors and continue when enabled. |
+| `is_skip_unavailable_nodes` | `True` | Query `sinfo` and automatically exclude selected nodes. |
+
+The approximate maximum number of concurrent parameter calls is `slurm_array_parallelism × parallel_process_per_task`, subject to scheduling and the remaining work in each batch. Parameters are split evenly by count; uneven task durations can leave a few batches running longer than others.
+
+## Automatic Redis Management
+
+Each submission first reads `~/.config/lytools_HPC/redis.json` and tests its saved IP addresses with authenticated `PING` requests. A reachable service is reused and its persistence settings are checked. Otherwise, a new service is started on the current node.
+
+New services use a randomly selected available port between 20001 and 65535 and a randomly generated password. The program tests every non-loopback IPv4 interface address on the current node and saves successful addresses. Redis listens on IPv4 interfaces; IPv6 is not used.
+
+The connection configuration contains:
+
+| Field | Description |
+| --- | --- |
+| `ip` | Selected connection IP address. |
+| `ips` | All IP addresses that passed the connection test. |
+| `port` | Redis port. |
+| `password` | Generated authentication password. |
+| `pid` | Redis process ID recorded at startup. |
+| `executable` | Executable path. |
+
+The configuration file has mode `0600`. Connectivity tests run on the node executing the submission script; access from other workers still depends on cluster routing and firewall rules. Workers connect using the selected `ip` field.
+
+To start or connect to Redis separately:
+
 ```python
-from lytools_HPC import *
-log_folder = 'Your_log_folder'
-Check_logs(log_folder).read_err_files() # Read error files
-Check_logs(log_folder).read_out_files() # Read output files
+from lytools_HPC.redis_service import ensure_redis, connect
+
+info = ensure_redis()
+client = connect(info)
+try:
+    assert client.ping()
+finally:
+    client.close()
 ```
+
+### Local File Layout
+
+```text
+~/.config/lytools_HPC/
+├── bin/                       # Downloaded Redis executables
+├── data/
+│   ├── dump.rdb               # Created when snapshot conditions are met
+│   └── appendonlydir/         # Multipart AOF files on Redis 7+
+├── redis.json                 # IP addresses, port, password, and metadata
+├── redis.lock                 # Startup lock
+└── redis-<port>.log            # Redis server log
+```
+
+### Persistence
+
+- The data directory is `~/.config/lytools_HPC/data`. Redis loads existing persisted data when it restarts. Reusing a service also checks and attempts to enable these persistence settings.
+
+If an existing server blocks runtime changes to its data directory, the program reports an error. Stop that service and run again to start Redis with the new configuration. Persistence preserves Redis task state; it does not automatically resume or resubmit interrupted computations.
+
+## Progress and Logs
+
+The terminal monitor combines Redis counters, heartbeats, and log markers to display completion, processing speed, estimated remaining time, and batch status. A heartbeat indicates that the reporting process is alive; it does not guarantee that the worker function is making progress.
+
+```python
+from lytools_HPC import Check_logs, progress_bar_monitoring
+
+logs = Check_logs('/absolute/path/to/job_logs')
+logs.read_err_files()       # Print nonempty error logs.
+logs.read_out_files()       # Skip logs with completion markers by default.
+logs.read_result_files()    # Print results saved by Submitit.
+logs.read_submit_files()    # Print submission records.
+failed_batches = logs.get_err_params()  # Extract failed batch parameters.
+
+# Monitor an existing run with its Redis state and log directory.
+progress_bar_monitoring('existing-job-name', '/absolute/path/to/job_logs')
+```
+
+`Check_logs.watch()` repeatedly displays logs and task counts; press Ctrl+C to exit. Result and submission records use pickle, so only read files from trusted sources.
+
+## Test Scripts
+
+Run from the project root:
+
+```bash
+python tests/test_redis_service.py
+python tests/test_submit_jobs_array.py
+```
+
+- `test_redis_service.py` checks startup or reuse, authenticated connections to saved IPs, configuration permissions, reads and writes, and AOF settings, status, and files. It deletes only its own test key and leaves Redis running. Restart recovery is not tested.
+- `test_submit_jobs_array.py` executes computations through the main submission function and checks result files, Redis completion counts, and error logs. Edit constants at the top of the script to configure the partition, parallelism mode, batch count, worker count, memory, timeout, and output directory. No command-line arguments are required. Test artifacts are retained in a unique directory.
+
+Tests may download and start Redis. On HPC, the submission test submits real jobs and consumes compute resources.
+
+## Current Behavior and Usage Notes
+
+- **Use a dedicated log directory.** Submission deletes existing non-hidden files and directories in the selected log folder before displaying the confirmation prompt. Do not use a directory containing unrelated data.
+- **Use distinct job names.** Submitting with the same name resets its Redis progress state. Avoid sharing a name between concurrent runs.
+- **Single-batch execution:** When `job_number_limit=1`, the current implementation forces thread mode.
+- **Progress accuracy:** Keep `pbar_update_freq=1` for accurate counting. Larger values batch updates, and the current implementation does not flush a process's remaining partial batch on exit.
+- **Skipped errors:** With `error_skip=True`, failed parameter calls also increase the completion counter. Reaching 100% does not imply that every call succeeded; inspect logs and results.
+- **Node filtering:** Automatic node filtering and helper parsers target node names with the `cn` prefix. Set `is_skip_unavailable_nodes=False` for local runs or clusters using other naming conventions.
+- **Monitor completion:** If `scancel` exists, the current monitor invokes it for the recorded job when monitoring ends. Otherwise, cancellation is skipped.
+
+## License
+
+[MIT](LICENSE)

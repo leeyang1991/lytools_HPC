@@ -1,3 +1,4 @@
+from .redis_service import ensure_redis, load_connection, connect, config_path
 from os.path import isdir
 import submitit
 import subprocess
@@ -293,6 +294,9 @@ def sumbit_jobs_array(func,params_list,
     if log_folder is None:
         log_folder = Path.home() / '.config' / 'lytools_HPC_log' / job_name
 
+    ensure_redis()
+    global _REDIS
+    _REDIS = None
     init_job(job_name, params_list)
     # init_job(job_name_failed, params_list)
     # print(params_list)
@@ -501,6 +505,8 @@ class HPC_redis:
         pass
 
     def conn_redis(self):
+        if config_path().exists():
+            return connect(load_connection())
         redis_conf = Path.home() / '.config' / 'redis' / 'redis.conf'
         with open(redis_conf) as f:
             redis_conf = f.readlines()
@@ -538,7 +544,7 @@ class Check_logs:
         self.log_folder = log_folder
         if not os.path.isdir(log_folder):
             home = Path.home()
-            self.log_folder = home / '.config' / 'lytools_HPC_log' / log_folder
+            self.log_folder = home / '.config' / 'lytools_HPC/log' / log_folder
         pass
 
     def read_err_files(self):
@@ -952,8 +958,10 @@ def progress_bar_monitoring(job_name,log_folder=None):
                 # break
 
             time.sleep(2)
-    command = ["scancel", f"{submit_info_dict['Job id']}"]
-    subprocess.run(command, capture_output=True, text=True)
+    scancel = shutil.which("scancel")
+    if scancel is not None:
+        command = [scancel, f"{submit_info_dict['Job id']}"]
+        subprocess.run(command, capture_output=True, text=True)
 
 def is_iterable(obj):
     try:
@@ -1010,6 +1018,8 @@ def parse_node_list(node_list_str):
     if node_list_str is None:
         return [], ''
     NODELIST = node_list_str.replace('cn', '')
+    NODELIST = NODELIST.replace('gpu', '')
+    NODELIST = NODELIST.replace('gtx', '')
     NODELIST_list = []
     if '[' in NODELIST:
         NODELIST = NODELIST.replace('[', '')
