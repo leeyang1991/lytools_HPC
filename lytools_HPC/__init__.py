@@ -1,5 +1,5 @@
 # coding='utf-8'
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 __package_name__ = 'lytools_HPC'
 import warnings
 import requests

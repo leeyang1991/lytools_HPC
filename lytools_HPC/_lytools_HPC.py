@@ -272,7 +272,7 @@ def sumbit_jobs_array(func,params_list,
     '''
     :param func: the kernel function to run, should take one argument, e.g. func(params)
     :param params_list: list of tuples [params1, params2, ...]
-    :param log_folder: log_folder, if not specified, a folder of ~/config/lytools_HPC_log/[RANDOM STRING] will be created
+    :param log_folder: log_folder, if not specified, a folder of ~/config/lytools_HPC/log/[RANDOM STRING] will be created
     :param job_name: job_name, if not specified, a [RANDOM STRING] will be generated as job_name
     :param job_number_limit: number of total jobs you want to submit to slurm
     :param parallel_process_per_task: number of parallel processes per task, Recommend equal to :param cpus_per_task
@@ -292,7 +292,7 @@ def sumbit_jobs_array(func,params_list,
     if job_name is None:
         job_name = generate_random_string()
     if log_folder is None:
-        log_folder = Path.home() / '.config' / 'lytools_HPC_log' / job_name
+        log_folder = Path.home() / '.config' / 'lytools_HPC/log' / job_name
 
     ensure_redis()
     global _REDIS
