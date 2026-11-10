@@ -38,7 +38,8 @@ from rich.progress import (
     TimeRemainingColumn,
     ProgressColumn
 )
-
+from rich.console import Console
+console = Console(force_terminal=True)
 
 
 def listdir(fdir):
@@ -850,6 +851,8 @@ def progress_bar_monitoring(job_name,log_folder=None):
         IterSpeedColumn(),
         # TransferSpeedColumn(),
         TimeRemainingColumn(),
+        console=console
+
     ) as progress:
         task_success = progress.add_task(f"{job_name_str}", total=total_int,
                                          requested=req_count,

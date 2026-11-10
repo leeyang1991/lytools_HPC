@@ -213,6 +213,7 @@ def ensure_redis(timeout_min=600):
     Call on the allocated node before submitting jobs. The home directory must
     be shared with workers. An existing reachable service is reused.
     """
+    print('Starting or reusing Redis service (timeout=%s min)' % timeout_min)
     if isinstance(timeout_min, bool) or not math.isfinite(timeout_min) or timeout_min <= 0:
         raise ValueError('timeout_min must be a finite positive number')
     # Serialize startup across processes sharing this configuration directory.
