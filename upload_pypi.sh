@@ -1,18 +1,16 @@
+#!/bin/sh
+# Run with: sh upload_pypi.sh
+# Requires: python -m pip install setuptools wheel twine
+set -eu
 
-# sh upload_pypi in terminal
+# Resolve project files relative to this script, even when invoked elsewhere.
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$PROJECT_DIR"
 
-# before run this script, please install twine, wheel
-# before run this script, check __init__.py
-# before run this script, check setup.py
+# Build into a fresh directory so stale artifacts cannot be uploaded.
+RELEASE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/lytools-release.XXXXXX")
+trap 'rm -rf "$RELEASE_DIR"' EXIT HUP INT TERM
 
-# step 1 run this script
-# step 2 commit to github
-
-# after run this script, check commit information
-
-
-rm dist/*
-rm build/*
-
-python setup.py sdist bdist_wheel
-python -m twine upload --repository pypi dist/*
+python setup.py sdist --dist-dir "$RELEASE_DIR" bdist_wheel --dist-dir "$RELEASE_DIR"
+python -m twine check "$RELEASE_DIR"/*
+python -m twine upload --repository pypi "$RELEASE_DIR"/*

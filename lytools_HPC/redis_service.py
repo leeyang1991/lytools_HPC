@@ -12,6 +12,8 @@ import secrets
 import socket
 import subprocess
 import time
+import math
+import sys
 
 import redis
 
@@ -139,12 +141,80 @@ def enable_persistence(client, data_directory):
                 ) from exc
 
 
-def ensure_redis():
+def stop_redis():
+    """Gracefully stop the configured service, preserving persisted data.
+
+    Returns False when no configuration exists or the service is unreachable.
+    """
+    import fcntl
+    directory = config_path().parent
+    if not directory.exists():
+        return False
+    fd = os.open(str(directory / 'redis.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            info = load_connection()
+        except FileNotFoundError:
+            return False
+        return _shutdown(info)
+
+
+def _shutdown(info):
+    client = connect(info)
+    try:
+        try:
+            client.ping()
+        except redis.ConnectionError:
+            return False
+        client.shutdown(save=True)
+        config_path().unlink(missing_ok=True)
+        return True
+    finally:
+        client.close()
+
+
+def _set_lifetime(info, timeout_min):
+    """Called under startup lock; never shorten an existing shared lifetime."""
+    info['expires_at'] = max(info.get('expires_at', 0), time.time() + timeout_min * 60)
+    info['lifecycle_token'] = secrets.token_hex(16)
+    save_connection(info)
+    log_path = config_path().parent / 'redis-lifecycle.log'
+    with log_path.open('ab') as output:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                          '--watch', info['lifecycle_token']],
+                         stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                         start_new_session=True)
+
+
+def _watch_lifetime(token):
+    """Detached watcher survives the submitting Python process exiting."""
+    import fcntl
+    while True:
+        fd = os.open(str(config_path().parent / 'redis.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(fd, 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                info = load_connection()
+            except FileNotFoundError:
+                return
+            if info.get('lifecycle_token') != token:
+                return
+            if time.time() >= info['expires_at']:
+                if not _shutdown(info):
+                    config_path().unlink(missing_ok=True)
+                return
+        time.sleep(1)
+
+
+def ensure_redis(timeout_min=600):
     """Return verified connection details, starting a server if necessary.
 
     Call on the allocated node before submitting jobs. The home directory must
     be shared with workers. An existing reachable service is reused.
     """
+    if isinstance(timeout_min, bool) or not math.isfinite(timeout_min) or timeout_min <= 0:
+        raise ValueError('timeout_min must be a finite positive number')
     # Serialize startup across processes sharing this configuration directory.
     import fcntl
     directory = config_path().parent
@@ -168,9 +238,12 @@ def ensure_redis():
         except (OSError, ValueError, KeyError, redis.RedisError):
             pass
         if client is not None:
-            enable_persistence(client, data_directory)
-            save_connection(info)
-            return info
+            try:
+                enable_persistence(client, data_directory)
+                _set_lifetime(info, timeout_min)
+                return info
+            finally:
+                client.close()
         executable = download_redis()
         addresses = node_ips()
         # Binding a probe alone cannot reserve a port for another process;
@@ -201,12 +274,12 @@ def ensure_redis():
             while time.monotonic() < deadline and process.poll() is None:
                 try:
                     verify_ips(info, addresses)
-                    info.update(pid=process.pid, executable=str(executable))
-                    save_connection(info)
-                    return info
                 except (OSError, redis.RedisError):
-                    pass
-                time.sleep(0.2)
+                    time.sleep(1)
+                    continue
+                info.update(pid=process.pid, executable=str(executable))
+                _set_lifetime(info, timeout_min)
+                return info
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -215,3 +288,10 @@ def ensure_redis():
                     process.kill()
                     process.wait()
         raise RuntimeError('Could not start Redis; inspect redis-*.log in %s' % directory)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--watch':
+        _watch_lifetime(sys.argv[2])
+    else:
+        raise SystemExit('Use ensure_redis() or stop_redis() from Python.')

@@ -1,4 +1,4 @@
-from .redis_service import ensure_redis, load_connection, connect, config_path
+from .redis_service import stop_redis, ensure_redis, load_connection, connect, config_path
 from os.path import isdir
 import submitit
 import subprocess
@@ -294,7 +294,7 @@ def sumbit_jobs_array(func,params_list,
     if log_folder is None:
         log_folder = Path.home() / '.config' / 'lytools_HPC/log' / job_name
 
-    ensure_redis()
+    ensure_redis(timeout_min=timeout_min)
     global _REDIS
     _REDIS = None
     init_job(job_name, params_list)

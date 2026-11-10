@@ -88,7 +88,7 @@ if __name__ == '__main__':
 | --- | --- | --- |
 | `func` | Required | Worker function with the signature `func(params)`. |
 | `params_list` | Required | Parameter groups, one per function call. |
-| `log_folder` | `None` | Defaults to `~/.config/lytools_HPC_log/<job_name>`. |
+| `log_folder` | `None` | Defaults to `~/.config/lytools_HPC/log/<job_name>`. |
 | `job_name` | `None` | Generated randomly if omitted; also identifies Redis progress state. |
 | `job_number_limit` | `10` | Number of batches; reduced automatically if it exceeds the parameter count. |
 | `parallel_process_per_task` | `10` | Number of worker threads or processes within each batch. |
@@ -206,3 +206,32 @@ Tests may download and start Redis. On HPC, the submission test submits real job
 ## License
 
 [MIT](LICENSE)
+
+## Redis Lifetime and Manual Shutdown
+
+Submission passes `timeout_min` to `ensure_redis(timeout_min=timeout_min)`.
+The lifetime begins when the service becomes available, before submission and
+queue waiting. A detached watchdog gracefully shuts Redis down with `SHUTDOWN
+SAVE` at expiry, even if the submission script has exited. Reusing Redis renews
+the lifetime to at least `timeout_min` minutes from that call; an existing later
+deadline is retained so a shorter submission cannot shorten it.
+
+The configuration records `expires_at` (Unix timestamp) and a watcher token.
+Only the latest watcher can shut down the current service. Watcher output is
+recorded in `redis-lifecycle.log`. Shutdown preserves the data directory and
+removes the connection configuration after success. The default lifetime for
+standalone `ensure_redis()` calls is 600 minutes.
+
+To stop the shared service manually:
+
+```python
+from lytools_HPC import stop_redis
+
+stopped = stop_redis()
+```
+
+`stop_redis()` returns `True` after shutdown, or `False` if no configuration
+exists or the service cannot be reached. Authentication and other server errors
+are propagated. Stopping Redis affects every run using it. Queue waiting counts
+against the lifetime; this timer does not extend automatically while jobs run.
+The watchdog requires its node and Python environment to remain available.

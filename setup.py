@@ -1,15 +1,18 @@
 
+from pathlib import Path
 from setuptools import setup
 
+PROJECT_DIR = Path(__file__).resolve().parent
+
 def get_version():
-    init_f = './lytools_HPC/__init__.py'
+    init_f = PROJECT_DIR / 'lytools_HPC' / '__init__.py'
     with open(init_f) as f:
         for line in f:
             if line.startswith('__version__'):
                 return line.split('=')[-1].strip().strip("'")
 version = get_version()
 
-long_description = open('README.md').read()
+long_description = (PROJECT_DIR / 'readme.md').read_text(encoding='utf-8')
 setup(
     name='lytools_HPC',
     version=version,
