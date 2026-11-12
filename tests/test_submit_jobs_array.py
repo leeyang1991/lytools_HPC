@@ -10,7 +10,6 @@ from pathlib import Path
 import socket
 import sys
 import time
-import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -46,7 +45,7 @@ test_task.__test__ = False
 
 
 def main():
-    run_id = 'lytools-test-' + uuid.uuid4().hex[:12]
+    run_id = 'lytools-test'
     directory = OUTPUT_ROOT.expanduser().resolve() / run_id
     results = directory / 'results'
     results.mkdir(parents=True)
@@ -56,15 +55,28 @@ def main():
     print('Submitting %s jobs, %s workers per job, %s parameters.' %
           (NUMBER_OF_JOBS, WORKERS_PER_JOB, len(values)))
     print('Artifacts: %s' % directory, flush=True)
-    sumbit_jobs_array(
-        test_task, params, log_folder=str(logs), job_name=run_id,
-        job_number_limit=NUMBER_OF_JOBS, parallel_process_per_task=WORKERS_PER_JOB,
-        slurm_array_parallelism=NUMBER_OF_JOBS, parallel_process_p_or_t=MODE,
-        cpus_per_task=WORKERS_PER_JOB, mem_gb=MEM_GB, timeout_min=TIMEOUT_MIN,
-        slurm_partition=PARTITION, pbar_update_freq=1,
-        skip_confirmation=True, error_skip=False,
-        is_skip_unavailable_nodes=False,
-    )
+
+    sumbit_jobs_array(test_task, params,
+                      log_folder=None,
+                      job_name=run_id,
+                      job_number_limit=NUMBER_OF_JOBS,
+                      parallel_process_per_task=WORKERS_PER_JOB,
+                      slurm_array_parallelism=-1,
+                      parallel_process_p_or_t='p',
+                      cpus_per_task=1,
+                      mem_gb=1,
+                      timeout_min=TIMEOUT_MIN,
+                      slurm_partition="general",
+                      # exclude_nodes='cn498',
+                      exclude_nodes=None,
+                      specific_nodes=None,
+                      pbar_update_freq=1,
+                      skip_confirmation=False,
+                      watch_dog_timeout_seconds=10,
+                      error_skip=False,
+                      is_skip_unavailable_nodes=True,
+                      )
+
 
     for index, value in enumerate(values):
         path = results / ('%s.json' % index)
@@ -73,7 +85,7 @@ def main():
         assert result['index'] == index and result['value'] == value
         assert result['square'] == value * value, 'Incorrect result for task %s' % index
     assert len(list(results.glob('*.json'))) == len(values), 'Unexpected result count'
-    print('PASS: all 8 task results match expected values')
+    print('PASS: all task results match expected values')
 
     client = connect(load_connection())
     try:
@@ -82,7 +94,7 @@ def main():
         assert int(state[b'step']) == len(values), 'Incorrect Redis completion count'
     finally:
         client.close()
-    print('PASS: Redis progress reached 8/8')
+    print('PASS: Redis progress reached')
     errors = []
     for path in logs.glob('*.err'):
         content = path.read_text(errors='replace')

@@ -1,5 +1,6 @@
 from .redis_service import stop_redis, ensure_redis, load_connection, connect, config_path
 from os.path import isdir
+
 import submitit
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -36,9 +37,9 @@ from rich.progress import (
     BarColumn,
     TextColumn,
     TimeRemainingColumn,
-    ProgressColumn
+    ProgressColumn,
+    Console,
 )
-from rich.console import Console
 console = Console(force_terminal=True)
 
 
@@ -393,9 +394,6 @@ def sumbit_jobs_array(func,params_list,
                 shutil.rmtree(fpath)
 
     mkdir(log_folder, force=True)
-    # log_folder_obj = Path(log_folder)
-    # fail_log_folder = log_folder_obj / 'failed_tasks'
-    # mkdir(fail_log_folder, force=True)
     if slurm_array_parallelism == -1:
         slurm_array_parallelism = job_number_limit
     if slurm_array_parallelism > job_number_limit:
@@ -404,18 +402,16 @@ def sumbit_jobs_array(func,params_list,
     if Concurrent_Processes > len(params_list):
         Concurrent_Processes = len(params_list)
     Total_Cores_Used = cpus_per_task * slurm_array_parallelism
-    # if Total_Cores_Used > len(params_list):
-    #     Total_Cores_Used = len(params_list)
     timeout_obj = datetime.timedelta(minutes=timeout_min)
-    # print(timeout_obj)
-    # exit()
     if is_skip_unavailable_nodes:
-        exclude_nodes_str = get_unavailable_nodes()
+        unavailable_nodes = get_unavailable_node()
+        exclude_nodes_str = group_nodes(unavailable_nodes) if unavailable_nodes is not None else None
     else:
         exclude_nodes_str = None
     final_exclude_nodes = add_node_list(exclude_nodes_str, exclude_nodes)
-    final_exclude_nodes_list, final_exclude_nodes_list_str = parse_node_list(final_exclude_nodes)
-    final_exclude_nodes = simplify_nodes_list(final_exclude_nodes_list)
+    final_exclude_nodes = group_nodes(final_exclude_nodes)
+    if len(final_exclude_nodes) == 0:
+        final_exclude_nodes = None
     info = OrderedDict({
         "Total Cores Used": Total_Cores_Used,
         "Concurrent Processes": Concurrent_Processes,
@@ -434,7 +430,6 @@ def sumbit_jobs_array(func,params_list,
     if not skip_confirmation:
         input('\33[7m' + "PRESS ENTER TO SUBMIT..." + '\33[0m')
     print('submiting...')
-
 
     executor = submitit.AutoExecutor(folder=log_folder)
     executor.update_parameters(
@@ -990,8 +985,9 @@ def generate_random_string():
     return hex_dig
 
 
-def get_unavailable_nodes():
-    command = ["sinfo"]
+def get_unavailable_node():
+    """Return a sorted list of unavailable node names."""
+    command = ["sinfo","-N"]
     try:
         result = subprocess.run(command, capture_output=True, text=True)
     except:
@@ -1000,90 +996,91 @@ def get_unavailable_nodes():
     result_lines = output.splitlines()
     NODELIST_unvailable = []
     for line in result_lines:
-        PARTITION, AVAIL, TIMELIMIT, NODES, STATE, NODELIST = line.split()
-        if not 'cn' in NODELIST:
-            continue
+        NODELIST, NODES, PARTITION, STATE = line.split()
         if 'comp' in STATE or 'alloc' in STATE or 'drain' in STATE:
-            NODELIST_list, NODELIST_list_str = parse_node_list(NODELIST)
-            NODELIST_unvailable.extend(NODELIST_list)
+            NODELIST_unvailable.append(NODELIST)
         if 'preempt' in PARTITION:
-            NODELIST_list, NODELIST_list_str = parse_node_list(NODELIST)
-            NODELIST_unvailable.extend(NODELIST_list)
+            NODELIST_unvailable.append(NODELIST)
     NODELIST_unvailable = list(set(NODELIST_unvailable))
     NODELIST_unvailable.sort()
-    NODELIST_unvailable_str = 'cn' + str(NODELIST_unvailable)
-    NODELIST_unvailable_str = NODELIST_unvailable_str.replace(' ', '')
-    # print(NODELIST_unvailable_str)
-    # exit()
-    return NODELIST_unvailable_str
+    return NODELIST_unvailable
+
+
+def group_nodes(nodes):
+    """Compress node names into a Slurm node list string."""
+    if nodes is None or len(nodes) == 0:
+        return ''
+    groups = {}
+    for node in sorted(set(nodes)):
+        prefix = node.rstrip('0123456789')
+        number = node[len(prefix):]
+        groups.setdefault(prefix, []).append(number)
+
+    compressed = []
+    for prefix, numbers in groups.items():
+        if len(numbers) == 1:
+            compressed.append(prefix + numbers[0])
+            continue
+        numbers.sort(key=int)
+        ranges = []
+        start = end = numbers[0]
+        for number in numbers[1:]:
+            if int(number) == int(end) + 1:
+                end = number
+            else:
+                ranges.append(start if start == end else f'{start}-{end}')
+                start = end = number
+        ranges.append(start if start == end else f'{start}-{end}')
+        compressed.append(f"{prefix}[{','.join(ranges)}]")
+    return ','.join(compressed)
 
 def parse_node_list(node_list_str):
-    if node_list_str is None:
+    """Expand a Slurm node list, preserving prefixes and leading zeros."""
+    import re
+
+    if not node_list_str:
         return [], ''
-    NODELIST = node_list_str.replace('cn', '')
-    NODELIST = NODELIST.replace('gpu', '')
-    NODELIST = NODELIST.replace('gtx', '')
-    NODELIST_list = []
-    if '[' in NODELIST:
-        NODELIST = NODELIST.replace('[', '')
-        NODELIST = NODELIST.replace(']', '')
-        NODELIST_split = NODELIST.split(',')
-        for nodes in NODELIST_split:
-            if '-' in nodes:
-                start_nodes, end_nodes = nodes.split('-')
-                start_nodes = int(start_nodes)
-                end_nodes = int(end_nodes)
-                for node_i in range(start_nodes, end_nodes+1):
-                    NODELIST_list.append(node_i)
-            else:
-                if 'gpu' in nodes:
-                    continue
-                if 'gtx' in nodes:
-                    continue
-                node_i = int(nodes)
-                NODELIST_list.append(node_i)
-    else:
-        NODE = int(NODELIST)
-        NODELIST_list.append(NODE)
-    # print(NODELIST_unvailable)
-    NODELIST_list = list(set(NODELIST_list))
-    NODELIST_list.sort()
-    NODELIST_list_str = 'cn' + str(NODELIST_list)
-    NODELIST_list_str = NODELIST_list_str.replace(' ', '')
-    return NODELIST_list, NODELIST_list_str
+    nodes = []
+    # Split only on commas outside brackets.
+    for group in re.split(r',(?=[^\]]*(?:\[|$))', node_list_str):
+        group = group.strip()
+        match = re.fullmatch(r'([^\[\],]*)\[([^\[\]]+)\]', group)
+        if match:
+            prefix, entries = match.groups()
+            for entry in entries.split(','):
+                bounds = re.fullmatch(r'(\d+)(?:-(\d+))?', entry.strip())
+                if not bounds:
+                    raise ValueError(f'Invalid node range: {entry!r}')
+                start, end = bounds.groups()
+                end = end or start
+                if int(start) > int(end):
+                    raise ValueError(f'Invalid node range: {entry!r}')
+                width = len(start) if start.startswith('0') else 0
+                nodes.extend(prefix + str(n).zfill(width)
+                             for n in range(int(start), int(end) + 1))
+        elif group and not any(char in group for char in '[]'):
+            nodes.append(group)
+        else:
+            raise ValueError(f'Invalid node group: {group!r}')
+    nodes = list(dict.fromkeys(nodes))
+    return nodes
+
 
 def add_node_list(*args):
-    all_NODELIST_list = []
+    nodes = []
     for arg in args:
-        NODELIST_list, _ = parse_node_list(arg)
-        for node in NODELIST_list:
-            all_NODELIST_list.append(node)
-    all_NODELIST_list = list(set(all_NODELIST_list))
-    all_NODELIST_list.sort()
-    if len(all_NODELIST_list) == 0:
+        if arg is None:
+            continue
+        parsed = parse_node_list(arg)
+        nodes.extend(parsed)
+    if len(nodes) == 0:
         return None
-    all_NODELIST_list_str = 'cn' + str(all_NODELIST_list)
-    all_NODELIST_list_str = all_NODELIST_list_str.replace(' ', '')
-    return all_NODELIST_list_str
+    return nodes
 
 def check_nodes_list(nodes_list_str:str):
     cn_list = nodes_list_str.split('cn')
     if len(cn_list) != 2:
         raise ValueError('incorrect format of nodes_list_str, for example: "cn100" or cn[100,]')
-
-def simplify_nodes_list(nodes_list:list):
-    ranges = group_consecutive_vals(nodes_list)
-    node_str_all = ''
-    for r in ranges:
-        if len(r) > 2:
-            node_str = f'{r[0]}-{r[-1]},'
-            node_str_all += node_str
-        else:
-            for node in r:
-                node_str_all += str(node) + ','
-    node_str_all = node_str_all[:-1]
-    node_str_all = 'cn[' + node_str_all + ']'
-    return node_str_all
 
 
 def group_consecutive_vals(in_list):
@@ -1098,6 +1095,14 @@ def group_consecutive_vals(in_list):
 
 
 def main():
+    NODELIST_unvailable_str = group_nodes(get_unavailable_node())
+    # NODELIST_unvailable_list = parse_node_list(NODELIST_unvailable_str)
+    print(f"Unavailable nodes: {NODELIST_unvailable_str}")
+    # print(f"Parsed unavailable nodes: {parse_node_list(NODELIST_unvailable_str)}")
+    # print(NODELIST_unvailable_list)
+    # a=parse_node_list('cn200,cn202')
+    # print(a)
+    exit()
     raise UserWarning('Do not run this script')
 
 if __name__ == '__main__':
