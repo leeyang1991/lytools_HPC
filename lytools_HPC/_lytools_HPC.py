@@ -297,6 +297,10 @@ def sumbit_jobs_array(func,params_list,
         log_folder = Path.home() / '.config' / 'lytools_HPC/log' / job_name
 
     ensure_redis(timeout_min=timeout_min)
+    redis_conf = load_connection()
+    redis_ip = redis_conf['ip']
+    redis_hostname = redis_conf['hostname']
+    redis_port = redis_conf['port']
     global _REDIS
     _REDIS = None
     init_job(job_name, params_list)
@@ -424,6 +428,9 @@ def sumbit_jobs_array(func,params_list,
         "Job Name": job_name,
         "Log Folder": log_folder,
         "Watch Dog Time": watch_dog_timeout_seconds,
+        "Redis Hostname": redis_hostname,
+        "Redis IP": redis_ip,
+        "Redis Port": redis_port,
     })
     info['Exclude Nodes'] = final_exclude_nodes
     pretty_table_print(info)
@@ -1095,14 +1102,6 @@ def group_consecutive_vals(in_list):
 
 
 def main():
-    NODELIST_unvailable_str = group_nodes(get_unavailable_node())
-    # NODELIST_unvailable_list = parse_node_list(NODELIST_unvailable_str)
-    print(f"Unavailable nodes: {NODELIST_unvailable_str}")
-    # print(f"Parsed unavailable nodes: {parse_node_list(NODELIST_unvailable_str)}")
-    # print(NODELIST_unvailable_list)
-    # a=parse_node_list('cn200,cn202')
-    # print(a)
-    exit()
     raise UserWarning('Do not run this script')
 
 if __name__ == '__main__':

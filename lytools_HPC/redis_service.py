@@ -62,12 +62,12 @@ def verify_ips(info, addresses):
             client.close()
     if not successful:
         raise redis.ConnectionError('No reachable Redis IP address')
-    info.pop('hostname', None)
     info.update(ip=successful[0], ips=successful)
     return info
 
 
 def save_connection(info):
+    info.setdefault('hostname', socket.gethostname())
     directory = config_path().parent
     temporary = directory / ('redis-%s.json.tmp' % secrets.token_hex(8))
     try:
